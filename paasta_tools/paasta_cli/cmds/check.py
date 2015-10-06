@@ -274,15 +274,16 @@ def sensu_check(service, service_path):
         print PaastaCheckMessages.SENSU_MONITORING_MISSING
 
 
-def service_dir_check(service):
-    """Check whether directory service exists in /nail/etc/services
-    :param service: string of service name we wish to inspect
+def service_dir_check(service_name, service_root):
+    """Check whether directory service_name exists in /nail/etc/services
+    :param service_name: string of service name we wish to inspect
+    :param service_root: string of where to find service configs (aka yelpsoa-configs)
     """
     try:
-        validate_service_name(service)
-        print PaastaCheckMessages.service_dir_found(service)
+        validate_service_name(service_name)
+        print PaastaCheckMessages.service_dir_found(service_name)
     except NoSuchService:
-        print PaastaCheckMessages.service_dir_missing(service)
+        print PaastaCheckMessages.service_dir_missing(service_name)
 
 
 def smartstack_check(service, service_path):

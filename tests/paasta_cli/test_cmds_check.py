@@ -97,27 +97,27 @@ def test_check_paasta_check_calls_everything(
     )
 
 
-@patch('paasta_tools.paasta_cli.cmds.check.validate_service_name')
+@patch('paasta_tools.paasta_cli.cmds.check.validate_service_name', autospec=True)
 @patch('sys.stdout', new_callable=StringIO)
 def test_check_service_dir_check_pass(mock_stdout, mock_validate_service_name):
+    service_name = 'fake_service'
+    service_root = '/fake_yelpsoa_configs'
     mock_validate_service_name.return_value = None
-    service = 'fake_service'
-    expected_output = \
-        "%s\n" % PaastaCheckMessages.service_dir_found(service)
-    service_dir_check(service)
+    expected_output = "%s\n" % PaastaCheckMessages.service_dir_found(service_name)
+    service_dir_check(service_name, service_root)
     output = mock_stdout.getvalue()
 
     assert output == expected_output
 
 
-@patch('paasta_tools.paasta_cli.cmds.check.validate_service_name')
+@patch('paasta_tools.paasta_cli.cmds.check.validate_service_name', autospec=True)
 @patch('sys.stdout', new_callable=StringIO)
 def test_check_service_dir_check_fail(mock_stdout, mock_validate_service_name):
-    service = 'fake_service'
-    mock_validate_service_name.side_effect = NoSuchService(service)
-    expected_output = "%s\n" \
-                      % PaastaCheckMessages.service_dir_missing(service)
-    service_dir_check(service)
+    service_name = 'fake_service'
+    service_root = '/fake_yelpsoa_configs'
+    mock_validate_service_name.side_effect = NoSuchService(service_name)
+    expected_output = "%s\n" % PaastaCheckMessages.service_dir_missing(service_name)
+    service_dir_check(service_name, service_root)
     output = mock_stdout.getvalue()
 
     assert output == expected_output
