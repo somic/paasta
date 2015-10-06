@@ -302,21 +302,24 @@ def smartstack_check(service, service_path):
 def paasta_check(args):
     """Analyze the service in the PWD to determine if it is paasta ready
     :param args: argparse.Namespace obj created from sys.args by paasta_cli"""
-    service = guess_service_name()
-    service_path = os.path.join('/nail/etc/services', service)
+    service_name = guess_service_name()
+    service_root = '/nail/etc/services'
+    if args.yelpsoa_config_root:
+        service_root = args.yelpsoa_config_root
+    service_path = os.path.join(service_root, service_name)
 
-    service_dir_check(service)
+    service_dir_check(service_name)
     deploy_check(service_path)
-    deploy_has_security_check(service)
-    deploy_has_performance_check(service)
-    pipeline_check(service)
-    git_repo_check(service)
+    deploy_has_security_check(service_name)
+    deploy_has_performance_check(service_name)
+    pipeline_check(service_name)
+    git_repo_check(service_name)
     docker_check()
     makefile_check()
     marathon_check(service_path)
     marathon_deployments_check(service_path)
-    sensu_check(service, service_path)
-    smartstack_check(service, service_path)
+    sensu_check(service_name, service_path)
+    smartstack_check(service_name, service_path)
 
 
 def read_dockerfile_lines(path):

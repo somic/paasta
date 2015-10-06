@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import contextlib
+import os
 from StringIO import StringIO
 
-from mock import patch, MagicMock, call
+from mock import call, MagicMock, Mock, patch
 
 from paasta_tools.paasta_cli.cmds.check import deploy_check
 from paasta_tools.paasta_cli.cmds.check import deploy_has_performance_check
@@ -59,9 +60,9 @@ def test_check_paasta_check_calls_everything(
         mock_marathon_check,
         mock_makefile_check,
         mock_docker_check,
-        mock_deploy_check,
         mock_deploy_security_check,
         mock_deploy_performance_check,
+        mock_deploy_check,
         mock_guess_service_name,
         mock_validate_service_name,
         mock_service_dir_check,
@@ -72,7 +73,9 @@ def test_check_paasta_check_calls_everything(
 
     mock_guess_service_name.return_value = 'servicedocs'
     mock_validate_service_name.return_value = None
-    paasta_check(None)
+    mock_args = Mock()
+    mock_args.yelpsoa_config_root = '/yelpsoa-configs'
+    paasta_check(mock_args)
 
     assert mock_git_repo_check.called
     assert mock_pipeline_check.called
@@ -85,6 +88,13 @@ def test_check_paasta_check_calls_everything(
     assert mock_marathon_check.called
     assert mock_sensu_check.called
     assert mock_smartstart_check.called
+
+    # Cheating a little bit to add one additional assertion here (rather than
+    # spinning up another big heavily-mocked test) to allow me to pass
+    # --yelpsoa-config-root down to helper functions.
+    mock_deploy_check.assert_called_once_with(
+        os.path.join(mock_args.yelpsoa_config_root, mock_guess_service_name.return_value),
+    )
 
 
 @patch('paasta_tools.paasta_cli.cmds.check.validate_service_name')
