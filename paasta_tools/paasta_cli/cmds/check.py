@@ -315,7 +315,7 @@ def paasta_check(args):
         service_root = args.yelpsoa_config_root
     service_path = os.path.join(service_root, service_name)
 
-    service_dir_check(service_name)
+    service_dir_check(service_name, service_root)
     deploy_check(service_path)
     deploy_has_security_check(service_name)
     deploy_has_performance_check(service_name)
