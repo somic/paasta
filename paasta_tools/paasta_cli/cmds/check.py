@@ -34,7 +34,7 @@ from paasta_tools.utils import get_git_url
 from paasta_tools.utils import list_clusters
 from paasta_tools.utils import PaastaColors
 from paasta_tools.utils import _run
-from service_configuration_lib import read_service_configuration
+from service_configuration_lib import DEFAULT_SOA_DIR, read_service_configuration
 
 
 def get_pipeline_config(service):
@@ -47,6 +47,12 @@ def add_subparser(subparsers):
         'check',
         description="Execute 'paasta check' from service repo root",
         help="Determine whether service in pwd is paasta ready")
+    check_parser.add_argument(
+        '-y', '--yelpsoa-config-root',
+        dest='yelpsoa_config_root',
+        help='A directory from which yelpsoa-configs should be read from',
+        default=DEFAULT_SOA_DIR
+    )
     check_parser.set_defaults(command=paasta_check)
 
 
