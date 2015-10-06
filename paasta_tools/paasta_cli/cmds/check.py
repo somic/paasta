@@ -280,7 +280,7 @@ def service_dir_check(service_name, service_root):
     :param service_root: string of where to find service configs (aka yelpsoa-configs)
     """
     try:
-        validate_service_name(service_name)
+        validate_service_name(service_name, service_root)
         print PaastaCheckMessages.service_dir_found(service_name)
     except NoSuchService:
         print PaastaCheckMessages.service_dir_missing(service_name)
