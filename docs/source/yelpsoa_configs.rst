@@ -265,9 +265,60 @@ Each job configuration MAY specify the following options:
 smartstack.yaml
 ---------------
 
-The yaml where nerve namespaces are defined and bound to ports.
+Configure service registration, discovery, and load balancing. ::
 
-TODO: Link to nerve/synapse documentation on the format of this file.
+    ---
+    # A single service can have multiple namespaces, which will be registered and
+    # discovered separately. Each namespace has a top-level entry in this yaml
+    # file. Most services only have a "main" namespace.
+    main:
+      # mode: tcp or http. This determines whether HAProxy will load balance TCP
+      # connections or HTTP requests.
+      mode: http
+
+      # proxy_port is the port where synapse will have HAProxy bind.
+      proxy_port: 5432
+
+      # advertise: What levels of the location hiearchy where nerve should register
+      # your service. Should contain your `discover` level.
+      advertise: ['region']
+
+      # discover: What level of the location hierarchy where synapse should discover
+      # your service. Should be one of the levels listed in `advertise`.
+      discover: region
+
+      # healthcheck_uri: What URL nerve and synapse-configured HAProxy should
+      # check as a healthcheck. Marathon will also default to checking this. Only
+      # used in HTTP mode.
+      healthcheck_uri: /status
+
+      # healthcheck_timeout_s: Timeout, in seconds, for the healthcheck.
+      healthcheck_timeout_s: 1
+
+      # extra_healthcheck_headers: extra HTTP headers to pass during healthchecks.
+      extra_healthcheck_headers:
+        Host: www.example.com
+
+      # timeout_client_ms: HAProxy timeout for client inactivity.
+      timeout_client_ms: 100
+
+      # timeout_connect_ms: How long HAProxy should allow for establishing a
+      # connection.
+      timeout_connect_ms: 100
+
+      # timeout_server_ms: How long HAProxy should wait for the server to send 
+      timeout_server_ms: 1000
+
+      # healthcheck_port: If the healthcheck should hit a different port than the
+      # service runs on.
+      healthcheck_port: 5433
+
+      # updown_timeout_s: how long updown_service should wait for smartstack
+      # propagation before giving up.
+      updown_timeout_s: 300
+
+      # retries: How many times HAProxy should retry connections to servers
+      retries: 2
 
 monitoring.yaml
 ---------------
