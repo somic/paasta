@@ -26,6 +26,7 @@ import boto3
 from botocore.exceptions import ClientError
 from requests.exceptions import HTTPError
 
+from paasta_tools.autoscaling import ec2_fitness
 from paasta_tools.mesos_maintenance import drain
 from paasta_tools.mesos_maintenance import undrain
 from paasta_tools.mesos_tools import get_mesos_master
@@ -108,6 +109,32 @@ class ClusterAutoscaler(ResourceLogMixin):
         instance_reservations = [reservation['Instances'] for reservation in instance_descriptions['Reservations']]
         instances = [instance for reservation in instance_reservations for instance in reservation]
         return instances
+
+    def describe_instance_status(self, instance_ids, region=None, instance_filters=None):
+        """This wraps ec2.describe_instance_status and catches instance not
+        found errors. It returns a list of instance description
+        dictionaries.  Optionally, a filter can be passed through to
+        the ec2 call
+
+        :param instance_ids: a list of instance ids, [] means all
+        :param instance_filters: a list of ec2 filters
+        :param region to connect to ec2
+        :returns: a list of instance description dictionaries"""
+        if not instance_filters:
+            instance_filters = []
+        ec2_client = boto3.client('ec2', region_name=region)
+        try:
+            instance_descriptions = ec2_client.describe_instance_status(
+                InstanceIds=instance_ids,
+                Filters=instance_filters
+            )
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidInstanceID.NotFound':
+                self.log.warn('Cannot find one or more instance from IDs {}'.format(instance_ids))
+                return None
+            else:
+                raise
+        return instance_descriptions
 
     def get_instance_ips(self, instances, region=None):
         instance_descriptions = self.describe_instances([instance['InstanceId'] for instance in instances],
@@ -234,15 +261,6 @@ class ClusterAutoscaler(ResourceLogMixin):
                 else:
                     raise
 
-    def sort_slaves_to_kill(self, slaves):
-        """Pick the best slaves to kill. This returns a list of slaves
-        after sorting in preference of which slaves we kill first.
-        It sorts first by number of chronos tasks, then by total number of tasks
-
-        :param slaves: list of slaves dict
-        :returns: list of slaves dicts"""
-        return sorted(slaves, key=lambda x: (x.task_counts.chronos_count, x.task_counts.count))
-
     def scale_resource(self, current_capacity, target_capacity):
         """Scales an AWS resource based on current and target capacity
         If scaling up we just set target capacity and let AWS take care of the rest
@@ -333,6 +351,16 @@ class ClusterAutoscaler(ResourceLogMixin):
                 }
             ]
         )
+        instance_statuses = self.describe_instance_status(
+            instances=[],
+            region=self.resource['region'],
+            instance_filters=[
+                {
+                    'Name': 'private-ip-address',
+                    'Values': slave_ips
+                }
+            ]
+        )
         instance_type_weights = self.get_instance_type_weights()
         paasta_aws_slaves = []
         for slave in slaves:
@@ -346,12 +374,19 @@ class ClusterAutoscaler(ResourceLogMixin):
                     log.error("Found more than one instance with the same private IP {0}. "
                               "This should never happen")
                     raise ClusterAutoscalingError
+                status = [
+                    status for status in instance_statuses
+                    if status['InstanceId'] == matching_descriptions[0]['InstanceId']
+                ]
+                if not status:
+                    status = None
             else:
-                description=None
+                description = None
 
             paasta_aws_slaves.append(
                 PaastaAwsSlave(
                     slave=slave,
+                    instance_status=status,
                     instance_description=description,
                     instance_type_weights=instance_type_weights
                 )
@@ -362,7 +397,7 @@ class ClusterAutoscaler(ResourceLogMixin):
     def downscale_aws_resource(self, filtered_slaves, current_capacity, target_capacity):
         killed_slaves = 0
         while True:
-            filtered_sorted_slaves = self.sort_slaves_to_kill(filtered_slaves)
+            filtered_sorted_slaves = ec2_fitness.sort_by_ec2_fitness(filtered_slaves)[::-1]
             if len(filtered_sorted_slaves) == 0:
                 self.log.info("ALL slaves killed so moving on to next resource!")
                 break
