@@ -480,6 +480,10 @@ class SpotAutoscaler(ClusterAutoscaler):
     def exists(self):
         return False if not self.sfr or self.sfr['SpotFleetRequestState'] == 'cancelled' else True
 
+    @property
+    def sfr_state(self):
+        return self.sfr['SpotFleetRequestState'] if self.sfr else None
+
     def get_sfr(self, spotfleet_request_id, region=None):
         ec2_client = boto3.client('ec2', region_name=region)
         try:
@@ -499,53 +503,59 @@ class SpotAutoscaler(ClusterAutoscaler):
             SpotFleetRequestId=spotfleet_request_id)['ActiveInstances']
         return spot_fleet_instances
 
-    def metrics_provider(self):
-        if not self.sfr or self.sfr['SpotFleetRequestState'] == 'cancelled':
+    def validate_metrics_provider(self):
+        if not self.sfr or self.sfr_state == 'cancelled':
             self.log.error("SFR not found, removing config file.".format(self.resource['id']))
             self.cleanup_cancelled_config(self.resource['id'], self.config_folder, dry_run=self.dry_run)
+            return False
+        elif self.sfr_state in ['submitted', 'modifying', 'cancelled_terminating']:
+            self.log.warning("Not scaling an SFR in state: {} so {}, skipping...".format(
+                self.sfr_state,
+                self.resource['id'])
+            )
+            return False
+        elif self.sfr_state in ['cancelled_running', 'active'] and not self.instances:
+            self.log.warning("No instances found in SFR, this shouldn't be possible so we "
+                             "do nothing")
+            return False
+        elif self.sfr_state not in ['cancelled_running', 'active']:
+            self.log.error("Unexpected SFR state: {} for {}".format(self.sfr_state,
+                                                                    self.resource['id']))
+            raise ClusterAutoscalingError
+        elif self.is_aws_launching_instances() and self.sfr_state == 'active':
+            self.log.warning("AWS hasn't reached the TargetCapacity that is currently set. We won't make any "
+                             "changes this time as we should wait for AWS to launch more instances first.")
+            return False
+        return True
+
+    def metrics_provider(self):
+        if not self.validate_metrics_provider():
             return 0, 0
-        elif self.sfr['SpotFleetRequestState'] in ['cancelled_running', 'active']:
-            expected_instances = len(self.instances)
-            if expected_instances == 0:
-                self.log.warning("No instances found in SFR, this shouldn't be possible so we "
-                                 "do nothing")
-                return 0, 0
-            mesos_state = get_mesos_master().state
-            slaves = self.get_aws_slaves(mesos_state)
+        mesos_state = get_mesos_master().state
+        slaves = self.get_aws_slaves(mesos_state)
+
+        if self.sfr_state == 'active':
             error = self.get_mesos_utilization_error(
                 slaves=slaves,
                 mesos_state=mesos_state,
-                expected_instances=expected_instances)
-        elif self.sfr['SpotFleetRequestState'] in ['submitted', 'modifying', 'cancelled_terminating']:
-            self.log.warning("Not scaling an SFR in state: {} so {}, skipping...".format(
-                self.sfr['SpotFleetRequestState'],
-                self.resource['id'])
-            )
-            return 0, 0
-        else:
-            self.log.error("Unexpected SFR state: {} for {}".format(self.sfr['SpotFleetRequestState'],
-                                                                    self.resource['id']))
-            raise ClusterAutoscalingError
-        if self.is_aws_launching_instances() and self.sfr['SpotFleetRequestState'] == 'active':
-            self.log.warning("AWS hasn't reached the TargetCapacity that is currently set. We won't make any "
-                             "changes this time as we should wait for AWS to launch more instances first.")
-            return 0, 0
-        current, target = self.get_spot_fleet_delta(error)
-        if self.sfr['SpotFleetRequestState'] == 'cancelled_running':
+                expected_instances=len(self.instances))
+
+            return self.get_spot_fleet_delta(error)
+
+        elif self.sfr_state == 'cancelled_running':
             self.resource['min_capacity'] = 0
             slaves = self.get_pool_slaves(mesos_state)
             pool_error = self.get_mesos_utilization_error(
                 slaves=slaves,
                 mesos_state=mesos_state)
             if pool_error > 0:
-                self.log.info(
-                    "Not scaling cancelled SFR %s because we are under provisioned" % (self.resource['id'])
-                )
+                self.log.info("Not scaling cancelled SFR %s because we are under provisioned" % (self.resource['id']))
                 return 0, 0
             current, target = self.get_spot_fleet_delta(-1)
             if target == 1:
                 target = 0
-        return current, target
+            return current, target
+        assert False, 'internal error in SpotAutoscaler.metrics_provider'
 
     def is_aws_launching_instances(self):
         fulfilled_capacity = self.sfr['SpotFleetRequestConfig']['FulfilledCapacity']

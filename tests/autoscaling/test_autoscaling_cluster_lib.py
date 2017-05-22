@@ -681,10 +681,6 @@ class TestSpotAutoscaler(unittest.TestCase):
             mock_get_mesos_utilization_error.reset_mock()
             ret = self.autoscaler.metrics_provider()
             get_utilization_calls = [mock.call(self.autoscaler,
-                                               slaves=mock_slaves,
-                                               mesos_state=mock_mesos_state,
-                                               expected_instances=2),
-                                     mock.call(self.autoscaler,
                                                slaves=mock_get_pool_slaves.return_value,
                                                mesos_state=mock_mesos_state)]
             mock_get_mesos_utilization_error.assert_has_calls(get_utilization_calls)
