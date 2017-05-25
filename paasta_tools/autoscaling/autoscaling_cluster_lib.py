@@ -183,6 +183,7 @@ class ClusterAutoscaler(ResourceLogMixin):
         if current_instances == 0:
             error_message = ("No instances are active, not scaling until the instances are attached to mesos")
             raise ClusterAutoscalingError(error_message)
+
         if expected_instances:
             self.log.info("Found %.2f%% slaves registered in mesos for this resource (%d/%d)" % (
                 float(float(current_instances) / float(expected_instances)) * 100,
@@ -567,20 +568,19 @@ class SpotAutoscaler(ClusterAutoscaler):
         return float(self.sfr['SpotFleetRequestConfig']['FulfilledCapacity'])
 
     def get_spot_fleet_delta(self, error):
-        current_capacity = self.current_capacity
-        ideal_capacity = int(ceil((1 + error) * current_capacity))
-        self.log.debug("Ideal calculated capacity is %d instances" % ideal_capacity)
+        ideal_capacity = int(ceil((1 + error) * self.current_capacity))
         new_capacity = int(min(
             max(
                 self.resource['min_capacity'],
-                floor(current_capacity * (1.00 - MAX_CLUSTER_DELTA)),
+                floor(self.current_capacity * (1.00 - MAX_CLUSTER_DELTA)),
                 ideal_capacity,
                 1,  # A SFR cannot scale below 1 instance
             ),
-            ceil(current_capacity * (1.00 + MAX_CLUSTER_DELTA)),
+            ceil(self.current_capacity * (1.00 + MAX_CLUSTER_DELTA)),
             self.resource['max_capacity'],
         ))
         new_capacity = max(new_capacity, self.resource['min_capacity'])
+
         self.log.debug("The ideal capacity to scale to is %d instances" % ideal_capacity)
         self.log.debug("The capacity we will scale to is %d instances" % new_capacity)
         if ideal_capacity > self.resource['max_capacity']:
@@ -595,7 +595,7 @@ class SpotAutoscaler(ClusterAutoscaler):
                     ideal_capacity, self.resource['min_capacity']
                 )
             )
-        return current_capacity, new_capacity
+        return self.current_capacity, new_capacity
 
     def set_capacity(self, capacity):
         """ AWS won't modify a request that is already modifying. This
