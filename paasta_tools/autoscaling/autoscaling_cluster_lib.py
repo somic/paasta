@@ -672,8 +672,7 @@ class AsgAutoscaler(ClusterAutoscaler):
             self.log.warning("ASG still launching new instances so we won't make any"
                              "changes this time.")
             return 0, 0
-        expected_instances = len(self.instances)
-        if expected_instances == 0:
+        if not self.instances:
             self.log.warning("This ASG has no instances, delta should be 1 to "
                              "launch first instance unless max/min capacity override")
             return self.get_asg_delta(1)
@@ -682,7 +681,7 @@ class AsgAutoscaler(ClusterAutoscaler):
         error = self.get_mesos_utilization_error(
             slaves=slaves,
             mesos_state=mesos_state,
-            expected_instances=expected_instances)
+            expected_instances=len(self.instances))
         return self.get_asg_delta(error)
 
     def is_aws_launching_instances(self):
