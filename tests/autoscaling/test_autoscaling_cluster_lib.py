@@ -546,49 +546,49 @@ class TestSpotAutoscaler(unittest.TestCase):
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 5}}
         ret = self.autoscaler.get_spot_fleet_delta(-0.2)
-        assert ret == (5, 4)
+        assert ret == 4
 
         self.autoscaler.resource = {
             'min_capacity': 2,
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 7.3}}
         ret = self.autoscaler.get_spot_fleet_delta(-0.2)
-        assert ret == (7.3, 6)
+        assert ret == 6
 
         self.autoscaler.resource = {
             'min_capacity': 2,
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 5}}
         ret = self.autoscaler.get_spot_fleet_delta(0.2)
-        assert ret == (5, 6)
+        assert ret == 6
 
         self.autoscaler.resource = {
             'min_capacity': 2,
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 10}}
         ret = self.autoscaler.get_spot_fleet_delta(0.2)
-        assert ret == (10, 10)
+        assert ret == 10
 
         self.autoscaler.resource = {
             'min_capacity': 2,
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 2}}
         ret = self.autoscaler.get_spot_fleet_delta(-0.2)
-        assert ret == (2, 2)
+        assert ret == 2
 
         self.autoscaler.resource = {
             'min_capacity': 0,
             'max_capacity': 10}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 1}}
         ret = self.autoscaler.get_spot_fleet_delta(-1)
-        assert ret == (1, 1)
+        assert ret == 1
 
         self.autoscaler.resource = {
             'min_capacity': 0,
             'max_capacity': 100}
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': 20}}
         ret = self.autoscaler.get_spot_fleet_delta(-0.5)
-        assert ret == (20, int(floor(20 * (1.0 - autoscaling_cluster_lib.MAX_CLUSTER_DELTA))))
+        assert ret == int(floor(20 * (1.0 - autoscaling_cluster_lib.MAX_CLUSTER_DELTA)))
 
         current_instances = (10 * (1 - autoscaling_cluster_lib.MAX_CLUSTER_DELTA)) - 1
         self.autoscaler.resource = {
@@ -597,7 +597,7 @@ class TestSpotAutoscaler(unittest.TestCase):
         }
         self.autoscaler.sfr = {'SpotFleetRequestConfig': {'FulfilledCapacity': current_instances}}
         ret = self.autoscaler.get_spot_fleet_delta(-1)
-        assert ret == (current_instances, 10)
+        assert ret == 10
 
     def test_spotfleet_metrics_provider(self):
         with mock.patch(
@@ -619,8 +619,13 @@ class TestSpotAutoscaler(unittest.TestCase):
         ) as mock_cleanup_cancelled_config, mock.patch(
             'paasta_tools.autoscaling.autoscaling_cluster_lib.SpotAutoscaler.is_aws_launching_instances',
             autospec=True,
-        ) as mock_is_aws_launching_sfr_instances:
-            mock_get_spot_fleet_delta.return_value = 1, 2
+        ) as mock_is_aws_launching_sfr_instances, mock.patch(
+            'paasta_tools.autoscaling.autoscaling_cluster_lib.SpotAutoscaler.current_capacity',
+            new_callable=mock.PropertyMock,
+            autospec=None,
+        ) as mock_current_capacity:
+            mock_get_spot_fleet_delta.return_value = 2
+            mock_current_capacity.return_value = 1
             self.autoscaler.pool_settings = {}
             mock_is_aws_launching_sfr_instances.return_value = False
             mock_mesos_state = mock.Mock()
@@ -676,7 +681,8 @@ class TestSpotAutoscaler(unittest.TestCase):
             ret = self.autoscaler.metrics_provider()
             assert not mock_cleanup_cancelled_config.called
             assert ret == (0, 0)
-            mock_get_spot_fleet_delta.return_value = 2, 1
+            mock_get_spot_fleet_delta.return_value = 1
+            mock_current_capacity.return_value = 2
             mock_get_mesos_utilization_error.return_value = -0.2
             mock_get_mesos_utilization_error.reset_mock()
             ret = self.autoscaler.metrics_provider()
@@ -686,7 +692,8 @@ class TestSpotAutoscaler(unittest.TestCase):
             mock_get_mesos_utilization_error.assert_has_calls(get_utilization_calls)
 
             assert ret == (2, 0)
-            mock_get_spot_fleet_delta.return_value = 4, 2
+            mock_get_spot_fleet_delta.return_value = 2
+            mock_current_capacity.return_value = 4
             ret = self.autoscaler.metrics_provider()
             assert ret == (4, 2)
 

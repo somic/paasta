@@ -541,7 +541,7 @@ class SpotAutoscaler(ClusterAutoscaler):
                 mesos_state=mesos_state,
                 expected_instances=len(self.instances))
 
-            return self.get_spot_fleet_delta(error)
+            return self.current_capacity, self.get_spot_fleet_delta(error)
 
         elif self.sfr_state == 'cancelled_running':
             self.resource['min_capacity'] = 0
@@ -552,10 +552,10 @@ class SpotAutoscaler(ClusterAutoscaler):
             if pool_error > 0:
                 self.log.info("Not scaling cancelled SFR %s because we are under provisioned" % (self.resource['id']))
                 return 0, 0
-            current, target = self.get_spot_fleet_delta(-1)
+            target = self.get_spot_fleet_delta(-1)
             if target == 1:
                 target = 0
-            return current, target
+            return self.current_capacity, target
         assert False, 'internal error in SpotAutoscaler.metrics_provider'
 
     def is_aws_launching_instances(self):
@@ -595,7 +595,7 @@ class SpotAutoscaler(ClusterAutoscaler):
                     ideal_capacity, self.resource['min_capacity']
                 )
             )
-        return self.current_capacity, new_capacity
+        return new_capacity
 
     def set_capacity(self, capacity):
         """ AWS won't modify a request that is already modifying. This
