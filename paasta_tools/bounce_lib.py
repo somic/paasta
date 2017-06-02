@@ -26,6 +26,8 @@ from contextlib import contextmanager
 from kazoo.client import KazooClient
 from kazoo.exceptions import LockTimeout
 from marathon.models import MarathonApp
+from requests.exceptions import ConnectionError
+from requests.exceptions import RequestException
 
 from paasta_tools import marathon_tools
 from paasta_tools.smartstack_tools import get_registered_marathon_tasks
@@ -110,26 +112,6 @@ def bounce_lock_zookeeper(name):
         zk.stop()
 
 
-@contextmanager
-def create_app_lock():
-    """Acquire a lock in zookeeper for creating a marathon app. This is
-    due to marathon's extreme lack of resilience with creating multiple
-    apps at once, so we use this to not do that and only deploy
-    one app at a time."""
-    zk = KazooClient(hosts=load_system_paasta_config().get_zk_hosts(), timeout=ZK_LOCK_CONNECT_TIMEOUT_S)
-    zk.start()
-    lock = zk.Lock('%s/%s' % (ZK_LOCK_PATH, 'create_marathon_app_lock'))
-    try:
-        lock.acquire(timeout=30)  # timeout=0 throws some other strange exception
-        yield
-    except LockTimeout:
-        raise LockHeldException("Failed to acquire lock for creating marathon app!")
-    else:
-        lock.release()
-    finally:
-        zk.stop()
-
-
 def wait_for_create(app_id, client):
     """Wait for the specified app_id to be listed in marathon.
     Waits WAIT_CREATE_S seconds between calls to list_apps.
@@ -148,9 +130,8 @@ def create_marathon_app(app_id, config, client):
 
     :param config: The marathon configuration to be deployed
     :param client: A MarathonClient object"""
-    with create_app_lock():
-        client.create_app(app_id, MarathonApp(**config))
-        wait_for_create(app_id, client)
+    client.create_app(app_id, MarathonApp(**config))
+    wait_for_create(app_id, client)
 
 
 def wait_for_delete(app_id, client):
@@ -171,13 +152,12 @@ def delete_marathon_app(app_id, client):
 
     :param app_id: The marathon app id to be deleted
     :param client: A MarathonClient object"""
-    with create_app_lock():
-        # Scale app to 0 first to work around
-        # https://github.com/mesosphere/marathon/issues/725
-        client.scale_app(app_id, instances=0, force=True)
-        time.sleep(1)
-        client.delete_app(app_id, force=True)
-        wait_for_delete(app_id, client)
+    # Scale app to 0 first to work around
+    # https://github.com/mesosphere/marathon/issues/725
+    client.scale_app(app_id, instances=0, force=True)
+    time.sleep(1)
+    client.delete_app(app_id, force=True)
+    wait_for_delete(app_id, client)
 
 
 def kill_old_ids(old_ids, client):
@@ -196,13 +176,18 @@ def kill_old_ids(old_ids, client):
 
 
 def is_task_in_smartstack(task, service, nerve_ns, system_paasta_config):
-    return task in get_registered_marathon_tasks(
-        synapse_host=task.host,
-        synapse_port=system_paasta_config.get_synapse_port(),
-        synapse_haproxy_url_format=system_paasta_config.get_synapse_haproxy_url_format(),
-        service=compose_job_id(service, nerve_ns),
-        marathon_tasks=[task],
-    )
+    try:
+        registered_tasks = get_registered_marathon_tasks(
+            synapse_host=task.host,
+            synapse_port=system_paasta_config.get_synapse_port(),
+            synapse_haproxy_url_format=system_paasta_config.get_synapse_haproxy_url_format(),
+            service=compose_job_id(service, nerve_ns),
+            marathon_tasks=[task],
+        )
+        return task in registered_tasks
+    except (ConnectionError, RequestException) as e:
+        log.warning("Failed to connect to smartstack on %s, assuming task %s is unhealthy: %s" % (task.host, task, e))
+        return False
 
 
 def get_happy_tasks(app, service, nerve_ns, system_paasta_config, min_task_uptime=None, check_haproxy=False):

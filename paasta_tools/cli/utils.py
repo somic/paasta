@@ -19,6 +19,7 @@ import fnmatch
 import logging
 import os
 import pkgutil
+import random
 import re
 import subprocess
 import sys
@@ -179,9 +180,11 @@ class PaastaCheckMessages:
 
     CHRONOS_YAML_FOUND = success("Found chronos.yaml file.")
 
+    ADHOC_YAML_FOUND = success("Found adhoc.yaml file.")
+
     YAML_MISSING = failure(
         "No marathon.yaml or chronos.yaml exists, so your service cannot be deployed.\n  "
-        "Push a marathon-[superregion].yaml or chronos-[superregion].yaml "
+        "Push a marathon-[superregion].yaml, chronos-[superregion].yaml or adhoc-[superregion].yaml "
         "and run `paasta generate-pipeline`.\n  "
         "More info:", "http://y/yelpsoa-configs")
 
@@ -407,7 +410,7 @@ def find_connectable_master(masters):
 
     connectable_master = None
     for master in masters:
-        rc, output = check_ssh_and_sudo_on_master(master, timeout=timeout)
+        rc, output = check_ssh_on_master(master, timeout=timeout)
         if rc is True:
             connectable_master = master
             output = None
@@ -424,6 +427,8 @@ def connectable_master(cluster, system_paasta_config):
     if masters == []:
         raise NoMasterError('ERROR: %s' % output)
 
+    random.shuffle(masters)
+
     master, output = find_connectable_master(masters)
     if not master:
         raise NoMasterError(
@@ -433,12 +438,12 @@ def connectable_master(cluster, system_paasta_config):
     return master
 
 
-def check_ssh_and_sudo_on_master(master, timeout=10):
+def check_ssh_on_master(master, timeout=10):
     """Given a master, attempt to ssh to the master and run a simple command
     with sudo to verify that ssh and sudo work properly. Return a tuple of the
     success status (True or False) and any output from attempting the check.
     """
-    check_command = 'ssh -A -n -o StrictHostKeyChecking=no %s sudo paasta_serviceinit -h' % master
+    check_command = 'ssh -A -n -o StrictHostKeyChecking=no %s /bin/true' % master
     rc, output = _run(check_command, timeout=timeout)
     if rc == 0:
         return (True, None)
@@ -559,8 +564,10 @@ def execute_paasta_metastatus_on_remote_master(cluster, system_paasta_config, hu
 def run_chronos_rerun(master, service, instancename, **kwargs):
     timeout = 60
     verbose_flags = '-v ' * kwargs['verbose']
-    command = 'ssh -A -n -o StrictHostKeyChecking=no %s \'sudo chronos_rerun %s"%s %s" "%s"\'' % (
+    run_all_related_jobs_flag = '--run-all-related-jobs' if kwargs.get('run_all_related_jobs', False) else ''
+    command = 'ssh -A -n -o StrictHostKeyChecking=no %s \'sudo chronos_rerun %s%s"%s %s" "%s"\'' % (
         master,
+        run_all_related_jobs_flag,
         verbose_flags,
         service,
         instancename,
@@ -582,8 +589,7 @@ def execute_chronos_rerun_on_remote_master(service, instancename, cluster, syste
 
 
 def run_on_master(cluster, system_paasta_config, cmd_parts,
-                  timeout=None, shell=False, dry=False, err_code=-1,
-                  graceful_exit=True, stdin=None):
+                  timeout=None, err_code=-1, graceful_exit=False, stdin=None):
     """Find connectable master for :cluster: and :system_paasta_config: args and
     invoke command from :cmd_parts:, wrapping it in ssh call.
 
@@ -594,7 +600,6 @@ def run_on_master(cluster, system_paasta_config, cmd_parts,
     :param cmd_parts: passed into paasta_tools.utils._run as command along with
         ssh bits
     :param timeout: see paasta_tools.utils._run documentation (default: None)
-    :param shell: prepend :cmd_parts: with 'sh -c' (default: False)
     :param err_code: code to return along with error message when something goes
         wrong (default: -1)
     :param graceful_exit: wrap command in a bash script that waits for input and
@@ -606,13 +611,14 @@ def run_on_master(cluster, system_paasta_config, cmd_parts,
         return (err_code, str(e))
 
     if graceful_exit:
+        # signals don't travel over ssh, kill process when anything lands on stdin instead
         cmd_parts.append(
-            # send target cmd to background
-            "& script=$$; target=$!; " +
-            # wait for stdin and kill target cmd
-            "read; kill $target & " +
-            # wait for target cmd to die and kill current script
-            "while kill -0 $target 2>/dev/null; do sleep 1; done; kill $script; wait"
+            # send process to background and capture it's pid
+            '& p=$!; ' +
+            # wait for stdin with timeout in a loop, exit when original process finished
+            'while ! read -t1; do ! kill -0 $p 2>/dev/null && kill $$; done; ' +
+            # kill original process if loop finished (something on stdin)
+            'kill $p; wait'
         )
         stdin = subprocess.PIPE
         stdin_interrupt = True
@@ -621,15 +627,13 @@ def run_on_master(cluster, system_paasta_config, cmd_parts,
         stdin_interrupt = False
         popen_kwargs = {}
 
-    cmd_parts = ['ssh', '-t', '-t', '-A', master, "/bin/bash", "-c", quote(' '.join(cmd_parts))]
-    paasta_print(' '.join(cmd_parts))
+    cmd_parts = ['ssh', '-q', '-t', '-t', '-A', master, "sudo /bin/bash -c %s" % quote(' '.join(cmd_parts))]
 
-    if dry:
-        return (0, "Would have run: %s" % ' '.join(cmd_parts))
-    else:
-        return _run(cmd_parts, timeout=timeout, stream=True,
-                    stdin=stdin, stdin_interrupt=stdin_interrupt,
-                    popen_kwargs=popen_kwargs)
+    log.debug("Running %s" % ' '.join(cmd_parts))
+
+    return _run(cmd_parts, timeout=timeout, stream=True,
+                stdin=stdin, stdin_interrupt=stdin_interrupt,
+                popen_kwargs=popen_kwargs)
 
 
 def lazy_choices_completer(list_func):
@@ -660,15 +664,17 @@ def get_jenkins_build_output_url():
     return build_output
 
 
-def get_instance_config(service, instance, cluster, soa_dir, load_deployments=False):
+def get_instance_config(service, instance, cluster, soa_dir, load_deployments=False, instance_type=None):
     """ Returns the InstanceConfig object for whatever type of instance
     it is. (chronos or marathon) """
-    instance_type = validate_service_instance(
-        service=service,
-        instance=instance,
-        cluster=cluster,
-        soa_dir=soa_dir,
-    )
+    if instance_type is None:
+        instance_type = validate_service_instance(
+            service=service,
+            instance=instance,
+            cluster=cluster,
+            soa_dir=soa_dir,
+        )
+
     if instance_type == 'marathon':
         instance_config_load_function = load_marathon_service_config
     elif instance_type == 'chronos':

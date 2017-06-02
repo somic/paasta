@@ -52,7 +52,7 @@ from docker import Client
 from docker.utils import kwargs_from_env
 from kazoo.client import KazooClient
 
-import paasta_tools
+import paasta_tools.cli.fsm
 
 
 # DO NOT CHANGE SPACER, UNLESS YOU'RE PREPARED TO CHANGE ALL INSTANCES
@@ -117,7 +117,7 @@ class InvalidInstanceConfig(Exception):
     pass
 
 
-class InstanceConfig(dict):
+class InstanceConfig(object):
 
     def __init__(self, cluster, instance, service, config_dict, branch_dict):
         self.config_dict = config_dict
@@ -232,15 +232,23 @@ class InstanceConfig(dict):
         for value in self.config_dict.get('cap_add', []):
             yield {"key": "cap-add", "value": "{}".format(value)}
 
-    def format_docker_parameters(self):
+    def format_docker_parameters(self, with_labels=True):
         """Formats extra flags for running docker.  Will be added in the format
         `["--%s=%s" % (e['key'], e['value']) for e in list]` to the `docker run` command
         Note: values must be strings
 
+        :param with_labels: Whether to build docker parameters with or without labels
         :returns: A list of parameters to be added to docker run"""
-        parameters = [{"key": "memory-swap", "value": self.get_mem_swap()},
-                      {"key": "cpu-period", "value": "%s" % int(self.get_cpu_period())},
-                      {"key": "cpu-quota", "value": "%s" % int(self.get_cpu_quota())}]
+        parameters = [
+            {"key": "memory-swap", "value": self.get_mem_swap()},
+            {"key": "cpu-period", "value": "%s" % int(self.get_cpu_period())},
+            {"key": "cpu-quota", "value": "%s" % int(self.get_cpu_quota())},
+        ]
+        if with_labels:
+            parameters.extend([
+                {"key": "label", "value": "paasta_service=%s" % self.service},
+                {"key": "label", "value": "paasta_instance=%s" % self.instance},
+            ])
         parameters.extend(self.get_ulimit())
         parameters.extend(self.get_cap_add())
         return parameters
@@ -376,19 +384,54 @@ class InstanceConfig(dict):
                 return False, 'The specified disk value "%s" is not a valid float or int.' % disk
         return True, ''
 
+    def check_security(self):
+        security = self.config_dict.get('security')
+        if security is None:
+            return True, ''
+
+        outbound_firewall = security.get('outbound_firewall')
+        if outbound_firewall is None:
+            return True, ''
+
+        if outbound_firewall not in ('block', 'monitor'):
+            return False, 'Unrecognized outbound_firewall value "%s"' % outbound_firewall
+
+        unknown_keys = set(security.keys()) - {'outbound_firewall'}
+        if unknown_keys:
+            return False, 'Unrecognized items in security dict of service config: "%s"' % ','.join(unknown_keys)
+
+        return True, ''
+
+    def check_dependencies_reference(self):
+        dependencies_reference = self.config_dict.get('dependencies_reference')
+        if dependencies_reference is None:
+            return True, ''
+
+        dependencies = self.config_dict.get('dependencies')
+        if dependencies is None:
+            return False, 'dependencies_reference "%s" declared but no dependencies found' % dependencies_reference
+
+        if dependencies_reference not in dependencies:
+            return False, 'dependencies_reference "%s" not found in dependencies dictionary' % dependencies_reference
+
+        return True, ''
+
     def check(self, param):
         check_methods = {
             'cpus': self.check_cpus,
             'mem': self.check_mem,
+            'security': self.check_security,
+            'dependencies_reference': self.check_dependencies_reference,
         }
-        if param in check_methods:
-            return check_methods[param]()
+        check_method = check_methods.get(param)
+        if check_method is not None:
+            return check_method()
         else:
-            return False, 'Your Chronos config specifies "%s", an unsupported parameter.' % param
+            return False, 'Your service config specifies "%s", an unsupported parameter.' % param
 
     def validate(self):
         error_msgs = []
-        for param in ['cpus', 'mem']:
+        for param in ['cpus', 'mem', 'security', 'dependencies_reference']:
             check_passed, check_msg = self.check(param)
             if not check_passed:
                 error_msgs.append(check_msg)
@@ -433,6 +476,46 @@ class InstanceConfig(dict):
         volumes = system_volumes + self.get_extra_volumes()
         deduped = {v['containerPath'] + v['hostPath']: v for v in volumes}.values()
         return sort_dicts(deduped)
+
+    def get_dependencies_reference(self):
+        """Get the reference to an entry in dependencies.yaml
+
+        Defaults to None if not specified in the config.
+
+        :returns: A string specified in the config, None if not specified"""
+        return self.config_dict.get('dependencies_reference')
+
+    def get_dependencies(self):
+        """Get the contents of the dependencies_dict pointed to by the dependency_reference
+
+        Defaults to None if not specified in the config.
+
+        :returns: A list of dictionaries specified in the dependencies_dict, None if not specified"""
+        dependencies = self.config_dict.get('dependencies')
+        if not dependencies:
+            return None
+        return dependencies.get(self.get_dependencies_reference())
+
+    def get_outbound_firewall(self):
+        """Return 'block', 'monitor', or None as configured in security->outbound_firewall
+
+        Defaults to None if not specified in the config
+
+        :returns: A string specified in the config, None if not specified"""
+        security = self.config_dict.get('security')
+        if not security:
+            return None
+        return security.get('outbound_firewall')
+
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self.config_dict == other.config_dict and \
+                self.branch_dict == other.branch_dict and \
+                self.cluster == other.cluster and \
+                self.instance == other.instance and \
+                self.service == other.service
+        else:
+            return False
 
 
 def validate_service_instance(service, instance, cluster, soa_dir):
@@ -916,7 +999,7 @@ class SystemPaastaConfig(dict):
         return self['api_endpoints']
 
     def get_fsm_template(self):
-        fsm_path = os.path.dirname(sys.modules['paasta_tools.cli.fsm'].__file__)
+        fsm_path = os.path.dirname(paasta_tools.cli.fsm.__file__)
         template_path = os.path.join(fsm_path, "template")
         return self.get('fsm_template', template_path)
 
@@ -939,6 +1022,13 @@ class SystemPaastaConfig(dict):
             return self['log_reader']
         except KeyError:
             raise PaastaNotConfiguredError('Could not find log_reader in configuration directory: %s' % self.directory)
+
+    def get_deployd_metrics_provider(self):
+        """Get the metrics_provider configuration out of global paasta config
+
+        :returns: A string identifying the metrics_provider
+        """
+        return self.get('deployd_metrics_provider')
 
     def get_sensu_host(self):
         """Get the host that we should send sensu events to.
@@ -1048,6 +1138,35 @@ class SystemPaastaConfig(dict):
         :return: The name of the file
         """
         return self.get("security_check_command", None)
+
+    def get_deployd_number_workers(self):
+        """Get the number of workers to consume deployment q
+
+        :return: integer
+        """
+        return self.get("deployd_number_workers", 4)
+
+    def get_deployd_big_bounce_rate(self):
+        """Get the number of deploys to do per minute when deployd starts
+        or determines it needs to bounce all services
+
+        :return: integer
+        """
+        return self.get("deployd_big_bounce_rate", 2)
+
+    def get_deployd_startup_bounce_rate(self):
+        """Get the number of deploys to do per minute when deployd starts
+
+        :return: integer
+        """
+        return self.get("deployd_startup_bounce_rate", 5)
+
+    def get_deployd_log_level(self):
+        """Get the log level for paasta-deployd
+
+        :return: string name of python logging level, e.g. INFO, DEBUG etc.
+        """
+        return self.get("deployd_log_level", 'INFO')
 
 
 def _run(command, env=os.environ, timeout=None, log=False, stream=False,

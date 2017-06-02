@@ -19,6 +19,7 @@ make the PaaSTA stack work.
 from __future__ import absolute_import
 from __future__ import unicode_literals
 
+import copy
 import datetime
 import json
 import logging
@@ -35,7 +36,6 @@ from paasta_tools.long_running_service_tools import InvalidHealthcheckMode
 from paasta_tools.long_running_service_tools import load_service_namespace_config
 from paasta_tools.long_running_service_tools import LongRunningServiceConfig
 from paasta_tools.mesos.exceptions import NoSlavesAvailableError
-from paasta_tools.mesos_maintenance import get_draining_hosts
 from paasta_tools.mesos_tools import filter_mesos_slaves_by_blacklist
 from paasta_tools.mesos_tools import get_mesos_network_for_net
 from paasta_tools.mesos_tools import get_mesos_slaves_grouped_by_attribute
@@ -57,7 +57,6 @@ from paasta_tools.utils import paasta_print
 from paasta_tools.utils import PaastaNotConfiguredError
 from paasta_tools.utils import time_cache
 
-CONTAINER_PORT = 8888
 # Marathon creates Mesos tasks with an id composed of the app's full name, a
 # spacer, and a UUID. This variable is that spacer. Note that we don't control
 # this spacer, i.e. you can't change it here and expect the world to change
@@ -377,7 +376,7 @@ class MarathonServiceConfig(LongRunningServiceConfig):
         if net == 'BRIDGE':
             complete_config['container']['docker']['portMappings'] = [
                 {
-                    'containerPort': CONTAINER_PORT,
+                    'containerPort': self.get_container_port(),
                     'hostPort': self.get_host_port(),
                     'protocol': 'tcp',
                 },
@@ -399,13 +398,24 @@ class MarathonServiceConfig(LongRunningServiceConfig):
         code_sha = get_code_sha_from_dockerurl(docker_url)
 
         config_hash = get_config_hash(
-            {key: value for key, value in complete_config.items() if key not in CONFIG_HASH_BLACKLIST},
+            self.sanitize_for_config_hash(complete_config),
             force_bounce=self.get_force_bounce(),
         )
         complete_config['id'] = format_job_id(self.service, self.instance, code_sha, config_hash)
 
         log.debug("Complete configuration for instance is: %s", complete_config)
         return complete_config
+
+    def sanitize_for_config_hash(self, config):
+        """Removes some data from complete_config to make it suitable for
+        calculation of config hash.
+
+        :param config: complete_config hash to sanitize
+        :returns: sanitized copy of complete_config hash
+        """
+        ahash = {key: copy.deepcopy(value) for key, value in config.items() if key not in CONFIG_HASH_BLACKLIST}
+        ahash['container']['docker']['parameters'] = self.format_docker_parameters(with_labels=False)
+        return ahash
 
     def get_healthchecks(self, service_namespace_config):
         """Returns a list of healthchecks per `the Marathon docs`_.
@@ -988,15 +998,16 @@ def is_old_task_missing_healthchecks(task, marathon_client):
     return False
 
 
-def get_num_at_risk_tasks(app):
+def get_num_at_risk_tasks(app, draining_hosts):
     """Determine how many of an application's tasks are running on
     at-risk (Mesos Maintenance Draining) hosts.
 
     :param app: A marathon application
+    :param draining_hosts: A list of hostnames that are marked as draining.
+                           See paasta_tools.mesos_maintenance.get_draining_hosts
     :returns: An integer representing the number of tasks running on at-risk hosts
     """
     hosts_tasks_running_on = [task.host for task in app.tasks]
-    draining_hosts = get_draining_hosts()
     num_at_risk_tasks = 0
     for host in hosts_tasks_running_on:
         if host in draining_hosts:

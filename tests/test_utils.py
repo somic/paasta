@@ -337,6 +337,13 @@ def test_SystemPaastaConfig_get_sensu_port():
     assert actual == expected
 
 
+def test_SystemPaastaConfig_get_deployd_metrics_provider():
+    fake_config = utils.SystemPaastaConfig({"deployd_metrics_provider": 'bar'}, '/some/fake/dir')
+    actual = fake_config.get_deployd_metrics_provider()
+    expected = 'bar'
+    assert actual == expected
+
+
 def test_SystemPaastaConfig_get_cluster_fqdn_format_default():
     fake_config = utils.SystemPaastaConfig({}, '/some/fake/dir')
     actual = fake_config.get_cluster_fqdn_format()
@@ -348,6 +355,27 @@ def test_SystemPaastaConfig_get_cluster_fqdn_format():
     fake_config = utils.SystemPaastaConfig({"cluster_fqdn_format": "paasta-{cluster:s}.something"}, '/some/fake/dir')
     actual = fake_config.get_cluster_fqdn_format()
     expected = 'paasta-{cluster:s}.something'
+    assert actual == expected
+
+
+def test_SystemPaastaConfig_get_deployd_number_workers():
+    fake_config = utils.SystemPaastaConfig({"deployd_number_workers": 3}, '/some/fake/dir')
+    actual = fake_config.get_deployd_number_workers()
+    expected = 3
+    assert actual == expected
+
+
+def test_SystemPaastaConfig_get_deployd_big_bounce_rate():
+    fake_config = utils.SystemPaastaConfig({"deployd_big_bounce_rate": 3}, '/some/fake/dir')
+    actual = fake_config.get_deployd_big_bounce_rate()
+    expected = 3
+    assert actual == expected
+
+
+def test_SystemPaastaConfig_get_deployd_log_level():
+    fake_config = utils.SystemPaastaConfig({"deployd_log_level": 'DEBUG'}, '/some/fake/dir')
+    actual = fake_config.get_deployd_log_level()
+    expected = 'DEBUG'
     assert actual == expected
 
 
@@ -832,6 +860,8 @@ class TestInstanceConfig:
             {"key": "memory-swap", "value": '1024m'},
             {"key": "cpu-period", "value": "100000"},
             {"key": "cpu-quota", "value": "1000000"},
+            {"key": "label", "value": "paasta_service=fake_name"},
+            {"key": "label", "value": "paasta_instance=fake_instance"},
         ]
 
     def test_format_docker_parameters_non_default(self):
@@ -856,6 +886,8 @@ class TestInstanceConfig:
             {"key": "memory-swap", "value": '1024m'},
             {"key": "cpu-period", "value": "200000"},
             {"key": "cpu-quota", "value": "600000"},
+            {"key": "label", "value": "paasta_service=fake_name"},
+            {"key": "label", "value": "paasta_instance=fake_instance"},
             {"key": "ulimit", "value": "nice=20"},
             {"key": "ulimit", "value": "nofile=1024:2048"},
             {"key": "cap-add", "value": "IPC_LOCK"},
@@ -1283,6 +1315,79 @@ class TestInstanceConfig:
         assert fake_conf.get_volumes(system_volumes) == [
             {"containerPath": "/a", "hostPath": "/a", "mode": "RW"},
         ]
+
+    @pytest.mark.parametrize(('dependencies_reference', 'dependencies', 'expected'), [
+        (None, None, None),
+        ('aaa', None, None),
+        ('aaa', {}, None),
+        ('aaa', {"aaa": [{"foo": "bar"}]}, {"foo": "bar"}),
+        ('aaa', {"bbb": [{"foo": "bar"}]}, None),
+    ])
+    def test_get_dependencies(self, dependencies_reference, dependencies, expected):
+        fake_conf = utils.InstanceConfig(
+            service='',
+            cluster='',
+            instance='',
+            config_dict={
+                'dependencies_reference': dependencies_reference,
+                'dependencies': dependencies
+            },
+            branch_dict={},
+        )
+        fake_conf.get_dependencies() == expected
+
+    @pytest.mark.parametrize(('security', 'expected'), [
+        ({}, None),
+        (None, None),
+        ({"outbound_firewall": "monitor"}, 'monitor'),
+        ({"outbound_firewall": "foo"}, 'foo'),
+    ])
+    def test_get_outbound_firewall(self, security, expected):
+        fake_conf = utils.InstanceConfig(
+            service='',
+            cluster='',
+            instance='',
+            config_dict={'security': security},
+            branch_dict={},
+        )
+        fake_conf.get_outbound_firewall() == expected
+
+    @pytest.mark.parametrize(('security', 'expected'), [
+        ({}, (True, '')),
+        ({"outbound_firewall": "monitor"}, (True, '')),
+        ({"outbound_firewall": "block"}, (True, '')),
+        ({"outbound_firewall": "foo"}, (False, 'Unrecognized outbound_firewall value "foo"')),
+        ({"outbound_firewall": "monitor", "foo": 1},
+            (False, 'Unrecognized items in security dict of service config: "foo"')),
+    ])
+    def test_check_security(self, security, expected):
+        fake_conf = utils.InstanceConfig(
+            service='',
+            cluster='',
+            instance='',
+            config_dict={'security': security},
+            branch_dict={},
+        )
+        assert fake_conf.check_security() == expected
+
+    @pytest.mark.parametrize(('dependencies_reference', 'dependencies', 'expected'), [
+        (None, None, (True, '')),
+        ('aaa', {"aaa": []}, (True, '')),
+        ('aaa', None, (False, 'dependencies_reference "aaa" declared but no dependencies found')),
+        ('aaa', {"bbb": []}, (False, 'dependencies_reference "aaa" not found in dependencies dictionary')),
+    ])
+    def test_check_dependencies_reference(self, dependencies_reference, dependencies, expected):
+        fake_conf = utils.InstanceConfig(
+            service='',
+            cluster='',
+            instance='',
+            config_dict={
+                'dependencies_reference': dependencies_reference,
+                'dependencies': dependencies
+            },
+            branch_dict={},
+        )
+        assert fake_conf.check_dependencies_reference() == expected
 
 
 def test_is_under_replicated_ok():

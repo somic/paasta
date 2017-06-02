@@ -17,6 +17,8 @@ from __future__ import division
 from __future__ import unicode_literals
 
 import logging
+import struct
+import time
 from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime
@@ -30,7 +32,8 @@ from gevent import pool
 from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError
 
-from paasta_tools.autoscaling.utils import _autoscaling_components
+from paasta_tools.autoscaling.forecasting import get_forecast_policy
+from paasta_tools.autoscaling.utils import get_autoscaling_component
 from paasta_tools.autoscaling.utils import register_autoscaling_component
 from paasta_tools.bounce_lib import LockHeldException
 from paasta_tools.bounce_lib import LockTimeout
@@ -75,7 +78,7 @@ def get_service_metrics_provider(name):
     """
     Returns a service metrics provider matching the given name.
     """
-    return _autoscaling_components[SERVICE_METRICS_PROVIDER_KEY][name]
+    return get_autoscaling_component(name, SERVICE_METRICS_PROVIDER_KEY)
 
 
 def get_decision_policy(name):
@@ -87,7 +90,7 @@ def get_decision_policy(name):
     0:  don't autoscale
     1:  autoscale up
     """
-    return _autoscaling_components[DECISION_POLICY_KEY][name]
+    return get_autoscaling_component(name, DECISION_POLICY_KEY)
 
 
 class MetricsProviderNoDataError(ValueError):
@@ -166,6 +169,106 @@ def pid_decision_policy(zookeeper_path, current_instances, min_instances, max_in
             zk.set(zk_last_time_path, str(current_time))
 
     return int(round(clamp_value(Kp * error + iterm + Kd * (error - last_error) / time_delta)))
+
+
+@register_autoscaling_component('proportional', DECISION_POLICY_KEY)
+def proportional_decision_policy(zookeeper_path, current_instances, min_instances, max_instances, setpoint, utilization,
+                                 num_healthy_instances, noop=False, offset=0.0, forecast_policy='current',
+                                 good_enough_window=None, **kwargs):
+    """Uses a simple proportional model to decide the correct number of instances to scale to, i.e. if load is 110% of
+    the setpoint, scales up by 10%. Includes correction for an offset, if your containers have a baseline utilization
+    independent of the number of containers.
+
+    The model is: utilization per container = (total load)/(number of containers) + offset.
+
+    total load and offset are measured in the same unit as your metric provider. If you're measuring CPU per container,
+    offset is the baseline CPU of an idle container, and total load is the total CPU required across all containers,
+    subtracting the offset for each container.
+
+    :param offset: A float (should be between 0.0 and 1.0) representing the expected baseline load for each container.
+                   e.g. if the metric you're using is CPU, then how much CPU an idle container would use.
+                   This should never be more than your setpoint. (If it takes 50% cpu to run an idle container, we can't
+                   get your utilization below 50% no matter how many containers we run.)
+    :param forecast_policy: The method for forecasting future load values. Currently, only two forecasters exist:
+                            - "current", which assumes that the load will remain the same as the current value for the
+                            near future.
+                            - "moving_average", which assumes that total load will remain near the average of data
+                            points within a window.
+    :param good_enough_window: A tuple/array of two utilization values, (low, high). If the utilization per container at
+                               the forecasted total load is within this window with the current number of instances,
+                               leave the number of instances alone. This can reduce churn. Setpoint should lie within
+                               this window.
+    """
+
+    forecast_policy_func = get_forecast_policy(forecast_policy)
+
+    current_load = (utilization - offset) * num_healthy_instances
+
+    historical_load = fetch_historical_load(zk_path_prefix=zookeeper_path)
+    historical_load.append((time.time(), current_load))
+    save_historical_load(historical_load, zk_path_prefix=zookeeper_path)
+
+    predicted_load = forecast_policy_func(historical_load, **kwargs)
+
+    desired_number_instances = int(round(predicted_load / (setpoint - offset)))
+
+    if good_enough_window:
+        low, high = good_enough_window
+        predicted_load_per_instance_with_current_instances = predicted_load / current_instances + offset
+        if low <= predicted_load_per_instance_with_current_instances <= high:
+            desired_number_instances = current_instances
+
+    if desired_number_instances < min_instances:
+        desired_number_instances = min_instances
+    if desired_number_instances > max_instances:
+        desired_number_instances = max_instances
+
+    return desired_number_instances - current_instances  # The calling function wants a delta, not an absolute value.
+
+
+HISTORICAL_LOAD_SERIALIZATION_FORMAT = 'dd'
+SIZE_PER_HISTORICAL_LOAD_RECORD = struct.calcsize(HISTORICAL_LOAD_SERIALIZATION_FORMAT)
+
+
+def zk_historical_load_path(zk_path_prefix):
+    return "%s/historical_load" % zk_path_prefix
+
+
+def save_historical_load(historical_load, zk_path_prefix):
+    with ZookeeperPool() as zk:
+        historical_load_bytes = serialize_historical_load(historical_load)
+        zk.ensure_path(zk_historical_load_path(zk_path_prefix))
+        zk.set(zk_historical_load_path(zk_path_prefix), historical_load_bytes)
+
+
+def serialize_historical_load(historical_load):
+    max_records = 1000000 // SIZE_PER_HISTORICAL_LOAD_RECORD
+    historical_load = historical_load[-max_records:]
+    return b''.join([struct.pack(HISTORICAL_LOAD_SERIALIZATION_FORMAT, *x) for x in historical_load])
+
+
+def fetch_historical_load(zk_path_prefix):
+    with ZookeeperPool() as zk:
+        try:
+            historical_load_bytes, _ = zk.get(zk_historical_load_path(zk_path_prefix))
+            return deserialize_historical_load(historical_load_bytes)
+        except NoNodeError:
+            return []
+
+
+def deserialize_historical_load(historical_load_bytes):
+    historical_load = []
+
+    for pos in range(0, len(historical_load_bytes), SIZE_PER_HISTORICAL_LOAD_RECORD):
+        historical_load.append(
+            struct.unpack(
+                # unfortunately struct.unpack doesn't like kwargs.
+                HISTORICAL_LOAD_SERIALIZATION_FORMAT,
+                historical_load_bytes[pos:pos + SIZE_PER_HISTORICAL_LOAD_RECORD],
+            )
+        )
+
+    return historical_load
 
 
 def get_json_body_from_service(host, port, endpoint, timeout=2):
@@ -311,14 +414,22 @@ def mesos_cpu_metrics_provider(marathon_service_config, marathon_tasks, mesos_ta
 
     monkey.patch_socket()
     jobs = [gevent.spawn(task.stats_callable) for task in mesos_tasks]
-    gevent.joinall(jobs, timeout=10)
+    gevent.joinall(jobs, timeout=60)
     mesos_tasks = dict(zip([task['id'] for task in mesos_tasks], [job.value for job in jobs]))
 
     current_time = int(datetime.now().strftime('%s'))
     time_delta = current_time - last_time
 
-    mesos_cpu_data = {task_id: float(stats.get('cpus_system_time_secs', 0.0) + stats.get(
-        'cpus_user_time_secs', 0.0)) / (stats.get('cpus_limit', 0) - .1) for task_id, stats in mesos_tasks.items()}
+    mesos_cpu_data = {}
+    for task_id, stats in mesos_tasks.items():
+        if stats is not None:
+            try:
+                utime = float(stats['cpus_user_time_secs'])
+                stime = float(stats['cpus_system_time_secs'])
+                limit = float(stats['cpus_limit']) - .1
+                mesos_cpu_data[task_id] = (stime + utime) / limit
+            except KeyError:
+                pass
 
     if not mesos_cpu_data:
         raise MetricsProviderNoDataError("Couldn't get any cpu data from Mesos")
@@ -387,13 +498,14 @@ def get_autoscaling_info(marathon_client, service, instance, cluster, soa_dir):
                                           marathon_tasks=list(marathon_tasks.values()),
                                           mesos_tasks=mesos_tasks)
             error = get_error_from_utilization(utilization=utilization,
-                                               setpoint=autoscaling_params.pop('setpoint'),
+                                               setpoint=autoscaling_params['setpoint'],
                                                current_instances=service_config.get_instances())
             new_instance_count = get_new_instance_count(utilization=utilization,
                                                         error=error,
                                                         autoscaling_params=autoscaling_params,
                                                         current_instances=service_config.get_instances(),
-                                                        marathon_service_config=service_config)
+                                                        marathon_service_config=service_config,
+                                                        num_healthy_instances=len(marathon_tasks))
             current_utilization = "{:.1f}%".format(utilization * 100)
         except MetricsProviderNoDataError:
             current_utilization = "Exception"
@@ -406,19 +518,22 @@ def get_autoscaling_info(marathon_client, service, instance, cluster, soa_dir):
     return None
 
 
-def get_new_instance_count(utilization, error, autoscaling_params, current_instances, marathon_service_config):
-    autoscaling_decision_policy = get_decision_policy(autoscaling_params.pop(DECISION_POLICY_KEY))
+def get_new_instance_count(utilization, error, autoscaling_params, current_instances, marathon_service_config,
+                           num_healthy_instances):
+    autoscaling_decision_policy = get_decision_policy(autoscaling_params[DECISION_POLICY_KEY])
 
     zookeeper_path = compose_autoscaling_zookeeper_root(
         service=marathon_service_config.service,
         instance=marathon_service_config.instance,
     )
     autoscaling_amount = autoscaling_decision_policy(
+        utilization=utilization,
         error=error,
         min_instances=marathon_service_config.get_min_instances(),
         max_instances=marathon_service_config.get_max_instances(),
         current_instances=current_instances,
         zookeeper_path=zookeeper_path,
+        num_healthy_instances=num_healthy_instances,
         **autoscaling_params
     )
 
@@ -432,7 +547,7 @@ def get_new_instance_count(utilization, error, autoscaling_params, current_insta
 
 
 def get_utilization(marathon_service_config, autoscaling_params, log_utilization_data, marathon_tasks, mesos_tasks):
-    autoscaling_metrics_provider = get_service_metrics_provider(autoscaling_params.pop(SERVICE_METRICS_PROVIDER_KEY))
+    autoscaling_metrics_provider = get_service_metrics_provider(autoscaling_params[SERVICE_METRICS_PROVIDER_KEY])
 
     return autoscaling_metrics_provider(
         marathon_service_config=marathon_service_config,
@@ -463,7 +578,7 @@ def autoscale_marathon_instance(marathon_service_config, marathon_tasks, mesos_t
     )
     error = get_error_from_utilization(
         utilization=utilization,
-        setpoint=autoscaling_params.pop('setpoint'),
+        setpoint=autoscaling_params['setpoint'],
         current_instances=current_instances,
     )
     new_instance_count = get_new_instance_count(
@@ -471,7 +586,8 @@ def autoscale_marathon_instance(marathon_service_config, marathon_tasks, mesos_t
         error=error,
         autoscaling_params=autoscaling_params,
         current_instances=current_instances,
-        marathon_service_config=marathon_service_config
+        marathon_service_config=marathon_service_config,
+        num_healthy_instances=len(marathon_tasks),
     )
 
     safe_downscaling_threshold = int(current_instances * 0.7)

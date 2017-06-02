@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Edit this release and run "make release"
-RELEASE=0.60.3
+RELEASE=0.65.1
 
 SHELL=/bin/bash
 
@@ -52,6 +52,7 @@ package_%: build_$$*_docker
 	cp ../debian/changelog ../debian/changelog.old
 	$(ADD_MISSING_DEPS_MAYBE)
 	$(ADD_VERSION_SUFFIX)
+	cat ../extra-linux-requirements.txt >> ../requirements.txt
 
 	$(DOCKER_RUN) /bin/bash -c "dpkg-buildpackage -d && mv ../*.deb dist/"
 	# then move them back
